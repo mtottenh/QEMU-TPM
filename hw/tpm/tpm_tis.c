@@ -366,6 +366,8 @@ static void tpm_tis_receive_bh(void *opaque)
     TPMTISEmuState *tis = &s->s.tis;
     uint8_t locty = s->locty_number;
 
+    qemu_mutex_lock(&s->state_lock);
+
     tpm_tis_sts_set(&tis->loc[locty],
                     TPM_TIS_STS_VALID | TPM_TIS_STS_DATA_AVAILABLE);
     tis->loc[locty].state = TPM_TIS_STATE_COMPLETION;
@@ -382,6 +384,10 @@ static void tpm_tis_receive_bh(void *opaque)
     tpm_tis_raise_irq(s, locty,
                       TPM_TIS_INT_DATA_AVAILABLE | TPM_TIS_INT_STS_VALID);
 #endif
+
+    /* notify of completed command */
+    qemu_cond_signal(&s->cmd_complete);
+    qemu_mutex_unlock(&s->state_lock);
 }
 
 /*
@@ -400,6 +406,11 @@ static void tpm_tis_receive_cb(TPMState *s, uint8_t locty,
             tis->loc[locty].sts |= TPM_TIS_STS_SELFTEST_DONE;
         }
     }
+
+    qemu_mutex_lock(&s->state_lock);
+    /* notify of completed command */
+    qemu_cond_signal(&s->cmd_complete);
+    qemu_mutex_unlock(&s->state_lock);
 
     qemu_bh_schedule(tis->bh);
 }
@@ -1070,6 +1081,9 @@ static void tpm_tis_initfn(Object *obj)
     memory_region_init_io(&s->mmio, OBJECT(s), &tpm_tis_memory_ops,
                           s, "tpm-tis-mmio",
                           TPM_TIS_NUM_LOCALITIES << TPM_TIS_LOCALITY_SHIFT);
+
+    qemu_mutex_init(&s->state_lock);
+    qemu_cond_init(&s->cmd_complete);
 }
 
 static void tpm_tis_class_init(ObjectClass *klass, void *data)
