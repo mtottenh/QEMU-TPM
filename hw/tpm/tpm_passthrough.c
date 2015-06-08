@@ -34,6 +34,7 @@
 #include "tpm_tis.h"
 #include "tpm_util.h"
 #include "tpm_ioctl.h"
+#include "migration/migration.h"
 
 #define DEBUG_TPM 0
 
@@ -49,6 +50,7 @@
 #define TYPE_TPM_CUSE "tpm-cuse"
 
 static const TPMDriverOps tpm_passthrough_driver;
+static const VMStateDescription vmstate_tpm_cuse;
 
 /* data structures */
 typedef struct TPMPassthruThreadParams {
@@ -79,6 +81,10 @@ struct TPMPassthruState {
     QemuMutex state_lock;
     QemuCond cmd_complete;  /* singnaled once tpm_busy is false */
     bool tpm_busy;
+
+    Error *migration_blocker;
+
+    TPMBlobBuffers tpm_blobs;
 };
 
 typedef struct TPMPassthruState TPMPassthruState;
@@ -281,6 +287,10 @@ static void tpm_passthrough_shutdown(TPMPassthruState *tpm_pt)
                          strerror(errno));
         }
     }
+    if (tpm_pt->migration_blocker) {
+        migrate_del_blocker(tpm_pt->migration_blocker);
+        error_free(tpm_pt->migration_blocker);
+    }
 }
 
 /*
@@ -335,12 +345,14 @@ static int tpm_passthrough_cuse_check_caps(TPMPassthruState *tpm_pt)
 /*
  * Initialize the external CUSE TPM
  */
-static int tpm_passthrough_cuse_init(TPMPassthruState *tpm_pt)
+static int tpm_passthrough_cuse_init(TPMPassthruState *tpm_pt,
+                                     bool is_resume)
 {
     int rc = 0;
-    ptm_init init = {
-        .u.req.init_flags = INIT_FLAG_DELETE_VOLATILE,
-    };
+    ptm_init init;
+    if (is_resume) {
+        init.u.req.init_flags = INIT_FLAG_DELETE_VOLATILE;
+    }
 
     if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
         if (ioctl(tpm_pt->tpm_fd, PTM_INIT, &init) < 0) {
@@ -369,7 +381,7 @@ static int tpm_passthrough_startup_tpm(TPMBackend *tb)
                               tpm_passthrough_worker_thread,
                               &tpm_pt->tpm_thread_params);
 
-    tpm_passthrough_cuse_init(tpm_pt);
+    tpm_passthrough_cuse_init(tpm_pt, false);
 
     return 0;
 }
@@ -441,6 +453,32 @@ static int tpm_passthrough_reset_tpm_established_flag(TPMBackend *tb,
     return rc;
 }
 
+static int tpm_cuse_get_state_blobs(TPMBackend *tb,
+                                    bool decrypted_blobs,
+                                    TPMBlobBuffers *tpm_blobs)
+{
+    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
+
+    assert(TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt));
+
+    return tpm_util_cuse_get_state_blobs(tpm_pt->tpm_fd, decrypted_blobs,
+                                         tpm_blobs);
+}
+
+static int tpm_cuse_set_state_blobs(TPMBackend *tb,
+                                    TPMBlobBuffers *tpm_blobs)
+{
+    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
+
+    assert(TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt));
+
+    if (tpm_util_cuse_set_state_blobs(tpm_pt->tpm_fd, tpm_blobs)) {
+        return 1;
+    }
+
+    return tpm_passthrough_cuse_init(tpm_pt, true);
+}
+
 static bool tpm_passthrough_get_startup_error(TPMBackend *tb)
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
@@ -463,7 +501,7 @@ static void tpm_passthrough_deliver_request(TPMBackend *tb)
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
 
-    /* TPM considered busy once TPM Request scheduled for processing */
+    /* TPM considered busy once TPM request scheduled for processing */
     qemu_mutex_lock(&tpm_pt->state_lock);
     tpm_pt->tpm_busy = true;
     qemu_mutex_unlock(&tpm_pt->state_lock);
@@ -576,6 +614,25 @@ static int tpm_passthrough_open_sysfs_cancel(TPMBackend *tb)
     return fd;
 }
 
+static void tpm_passthrough_block_migration(TPMPassthruState *tpm_pt)
+{
+    ptm_cap caps;
+
+    if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
+        caps = PTM_CAP_GET_STATEBLOB | PTM_CAP_SET_STATEBLOB |
+               PTM_CAP_STOP;
+        if (!TPM_CUSE_IMPLEMENTS_ALL(tpm_pt, caps)) {
+            error_setg(&tpm_pt->migration_blocker,
+                       "Migration disabled: CUSE TPM lacks necessary capabilities");
+            migrate_add_blocker(tpm_pt->migration_blocker);
+        }
+    } else {
+        error_setg(&tpm_pt->migration_blocker,
+                   "Migration disabled: Passthrough TPM does not support migration");
+        migrate_add_blocker(tpm_pt->migration_blocker);
+    }
+}
+
 static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
@@ -617,7 +674,7 @@ static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
             goto err_close_tpmdev;
         }
         /* init TPM for probing */
-        if (tpm_passthrough_cuse_init(tpm_pt)) {
+        if (tpm_passthrough_cuse_init(tpm_pt, false)) {
             goto err_close_tpmdev;
         }
     }
@@ -634,6 +691,7 @@ static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
         }
     }
 
+    tpm_passthrough_block_migration(tpm_pt);
 
     return 0;
 
@@ -741,10 +799,13 @@ static void tpm_passthrough_inst_init(Object *obj)
 
     qemu_mutex_init(&tpm_pt->state_lock);
     qemu_cond_init(&tpm_pt->cmd_complete);
+
+    vmstate_register(NULL, -1, &vmstate_tpm_cuse, obj);
 }
 
 static void tpm_passthrough_inst_finalize(Object *obj)
 {
+    vmstate_unregister(NULL, &vmstate_tpm_cuse, obj);
 }
 
 static void tpm_passthrough_class_init(ObjectClass *klass, void *data)
@@ -776,6 +837,60 @@ static const char *tpm_passthrough_cuse_create_desc(void)
 {
     return "CUSE TPM backend driver";
 }
+
+static void tpm_cuse_pre_save(void *opaque)
+{
+    TPMPassthruState *tpm_pt = opaque;
+    TPMBackend *tb = &tpm_pt->parent;
+
+     qemu_mutex_lock(&tpm_pt->state_lock);
+     /* wait for TPM to finish processing */
+     if (tpm_pt->tpm_busy) {
+        qemu_cond_wait(&tpm_pt->cmd_complete, &tpm_pt->state_lock);
+     }
+     qemu_mutex_unlock(&tpm_pt->state_lock);
+
+    /* get the decrypted state blobs from the TPM */
+    tpm_cuse_get_state_blobs(tb, TRUE, &tpm_pt->tpm_blobs);
+}
+
+static int tpm_cuse_post_load(void *opaque,
+                              int version_id __attribute__((unused)))
+{
+    TPMPassthruState *tpm_pt = opaque;
+    TPMBackend *tb = &tpm_pt->parent;
+
+    return tpm_cuse_set_state_blobs(tb, &tpm_pt->tpm_blobs);
+}
+
+static const VMStateDescription vmstate_tpm_cuse = {
+    .name = "cuse-tpm",
+    .version_id = 1,
+    .minimum_version_id = 0,
+    .minimum_version_id_old = 0,
+    .pre_save  = tpm_cuse_pre_save,
+    .post_load = tpm_cuse_post_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(tpm_blobs.permanent_flags, TPMPassthruState),
+        VMSTATE_UINT32(tpm_blobs.permanent.size, TPMPassthruState),
+        VMSTATE_VBUFFER_ALLOC_UINT32(tpm_blobs.permanent.buffer,
+                                     TPMPassthruState, 1, NULL, 0,
+                                     tpm_blobs.permanent.size),
+
+        VMSTATE_UINT32(tpm_blobs.volatil_flags, TPMPassthruState),
+        VMSTATE_UINT32(tpm_blobs.volatil.size, TPMPassthruState),
+        VMSTATE_VBUFFER_ALLOC_UINT32(tpm_blobs.volatil.buffer,
+                                     TPMPassthruState, 1, NULL, 0,
+                                     tpm_blobs.volatil.size),
+
+        VMSTATE_UINT32(tpm_blobs.savestate_flags, TPMPassthruState),
+        VMSTATE_UINT32(tpm_blobs.savestate.size, TPMPassthruState),
+        VMSTATE_VBUFFER_ALLOC_UINT32(tpm_blobs.savestate.buffer,
+                                     TPMPassthruState, 1, NULL, 0,
+                                     tpm_blobs.savestate.size),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const TPMDriverOps tpm_cuse_driver = {
     .type                     = TPM_TYPE_CUSE_TPM,

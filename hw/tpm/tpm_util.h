@@ -25,4 +25,11 @@
 
 int tpm_util_test_tpmdev(int tpm_fd, TPMVersion *tpm_version);
 
+int tpm_util_cuse_get_state_blobs(int tpm_fd,
+                                  bool decrypted_blobs,
+                                  TPMBlobBuffers *tpm_blobs);
+
+int tpm_util_cuse_set_state_blobs(int tpm_fd,
+                                  TPMBlobBuffers *tpm_blobs);
+
 #endif /* TPM_TPM_UTILS_H */

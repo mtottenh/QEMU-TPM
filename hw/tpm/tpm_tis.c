@@ -366,6 +366,8 @@ static void tpm_tis_receive_bh(void *opaque)
     TPMTISEmuState *tis = &s->s.tis;
     uint8_t locty = s->locty_number;
 
+    tis->bh_scheduled = false;
+
     qemu_mutex_lock(&s->state_lock);
 
     tpm_tis_sts_set(&tis->loc[locty],
@@ -413,6 +415,8 @@ static void tpm_tis_receive_cb(TPMState *s, uint8_t locty,
     qemu_mutex_unlock(&s->state_lock);
 
     qemu_bh_schedule(tis->bh);
+
+    tis->bh_scheduled = true;
 }
 
 /*
@@ -1028,9 +1032,140 @@ static void tpm_tis_reset(DeviceState *dev)
     tpm_tis_do_startup_tpm(s);
 }
 
+
+/* persistent state handling */
+
+static void tpm_tis_pre_save(void *opaque)
+{
+    TPMState *s = opaque;
+    TPMTISEmuState *tis = &s->s.tis;
+    uint8_t locty = tis->active_locty;
+
+    DPRINTF("tpm_tis: suspend: locty = %d : r_offset = %d, w_offset = %d\n",
+            locty, tis->loc[0].r_offset, tis->loc[0].w_offset);
+#ifdef DEBUG_TIS
+    tpm_tis_dump_state(opaque, 0);
+#endif
+
+    qemu_mutex_lock(&s->state_lock);
+
+    /* wait for outstanding request to complete */
+    if (TPM_TIS_IS_VALID_LOCTY(locty) &&
+        tis->loc[locty].state == TPM_TIS_STATE_EXECUTION) {
+        /*
+         * If we get here when the bh is scheduled but did not run,
+         * we won't get notified...
+         */
+        if (!tis->bh_scheduled) {
+            /* backend thread to notify us */
+            qemu_cond_wait(&s->cmd_complete, &s->state_lock);
+        }
+        if (tis->loc[locty].state == TPM_TIS_STATE_EXECUTION) {
+            /* bottom half did not run - run its function */
+            qemu_mutex_unlock(&s->state_lock);
+            tpm_tis_receive_bh(opaque);
+            qemu_mutex_lock(&s->state_lock);
+        }
+    }
+
+    qemu_mutex_unlock(&s->state_lock);
+
+    /* copy current active read or write buffer into the buffer
+       written to disk */
+    if (TPM_TIS_IS_VALID_LOCTY(locty)) {
+        switch (tis->loc[locty].state) {
+        case TPM_TIS_STATE_RECEPTION:
+            memcpy(tis->buf,
+                   tis->loc[locty].w_buffer.buffer,
+                   MIN(sizeof(tis->buf),
+                       tis->loc[locty].w_buffer.size));
+            tis->offset = tis->loc[locty].w_offset;
+        break;
+        case TPM_TIS_STATE_COMPLETION:
+            memcpy(tis->buf,
+                   tis->loc[locty].r_buffer.buffer,
+                   MIN(sizeof(tis->buf),
+                       tis->loc[locty].r_buffer.size));
+            tis->offset = tis->loc[locty].r_offset;
+        break;
+        default:
+            /* leak nothing */
+            memset(tis->buf, 0x0, sizeof(tis->buf));
+        break;
+        }
+    }
+}
+
+static int tpm_tis_post_load(void *opaque,
+                             int version_id __attribute__((unused)))
+{
+    TPMState *s = opaque;
+    TPMTISEmuState *tis = &s->s.tis;
+
+    uint8_t locty = tis->active_locty;
+
+    if (TPM_TIS_IS_VALID_LOCTY(locty)) {
+        switch (tis->loc[locty].state) {
+        case TPM_TIS_STATE_RECEPTION:
+            memcpy(tis->loc[locty].w_buffer.buffer,
+                   tis->buf,
+                   MIN(sizeof(tis->buf),
+                       tis->loc[locty].w_buffer.size));
+            tis->loc[locty].w_offset = tis->offset;
+        break;
+        case TPM_TIS_STATE_COMPLETION:
+            memcpy(tis->loc[locty].r_buffer.buffer,
+                   tis->buf,
+                   MIN(sizeof(tis->buf),
+                       tis->loc[locty].r_buffer.size));
+            tis->loc[locty].r_offset = tis->offset;
+        break;
+        default:
+        break;
+        }
+    }
+
+    DPRINTF("tpm_tis: resume : locty = %d : r_offset = %d, w_offset = %d\n",
+            locty, tis->loc[0].r_offset, tis->loc[0].w_offset);
+
+    return 0;
+}
+
+static const VMStateDescription vmstate_locty = {
+    .name = "loc",
+    .version_id = 1,
+    .minimum_version_id = 0,
+    .minimum_version_id_old = 0,
+    .fields      = (VMStateField[]) {
+        VMSTATE_UINT32(state, TPMLocality),
+        VMSTATE_UINT32(inte, TPMLocality),
+        VMSTATE_UINT32(ints, TPMLocality),
+        VMSTATE_UINT8(access, TPMLocality),
+        VMSTATE_UINT32(sts, TPMLocality),
+        VMSTATE_UINT32(iface_id, TPMLocality),
+        VMSTATE_END_OF_LIST(),
+    }
+};
+
 static const VMStateDescription vmstate_tpm_tis = {
     .name = "tpm",
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 0,
+    .minimum_version_id_old = 0,
+    .pre_save  = tpm_tis_pre_save,
+    .post_load = tpm_tis_post_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(s.tis.offset, TPMState),
+        VMSTATE_BUFFER(s.tis.buf, TPMState),
+        VMSTATE_UINT8(s.tis.active_locty, TPMState),
+        VMSTATE_UINT8(s.tis.aborting_locty, TPMState),
+        VMSTATE_UINT8(s.tis.next_locty, TPMState),
+
+        VMSTATE_STRUCT_ARRAY(s.tis.loc, TPMState, TPM_TIS_NUM_LOCALITIES, 1,
+                             vmstate_locty, TPMLocality),
+
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static Property tpm_tis_properties[] = {

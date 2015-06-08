@@ -54,6 +54,8 @@ typedef struct TPMLocality {
 
 typedef struct TPMTISEmuState {
     QEMUBH *bh;
+    bool bh_scheduled; /* bh scheduled but did not run yet */
+
     uint32_t offset;
     uint8_t buf[TPM_TIS_BUFFER_MAX];
 

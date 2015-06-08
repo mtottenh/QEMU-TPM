@@ -63,6 +63,18 @@ typedef struct TPMSizedBuffer {
     uint8_t  *buffer;
 } TPMSizedBuffer;
 
+/* blobs from the TPM; part of VM state when migrating */
+typedef struct TPMBlobBuffers {
+    uint32_t permanent_flags;
+    TPMSizedBuffer permanent;
+
+    uint32_t volatil_flags;
+    TPMSizedBuffer volatil;
+
+    uint32_t savestate_flags;
+    TPMSizedBuffer savestate;
+} TPMBlobBuffers;
+
 struct TPMDriverOps {
     enum TpmType type;
     const QemuOptDesc *opts;
