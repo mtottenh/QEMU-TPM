@@ -75,6 +75,10 @@ struct TPMPassthruState {
     TPMVersion tpm_version;
     ptm_cap cuse_cap; /* capabilities of the CUSE TPM */
     uint8_t cur_locty_number; /* last set locality */
+
+    QemuMutex state_lock;
+    QemuCond cmd_complete;  /* singnaled once tpm_busy is false */
+    bool tpm_busy;
 };
 
 typedef struct TPMPassthruState TPMPassthruState;
@@ -249,6 +253,11 @@ static void tpm_passthrough_worker_thread(gpointer data,
         thr_parms->recv_data_callback(thr_parms->tpm_state,
                                       thr_parms->tpm_state->locty_number,
                                       selftest_done);
+        /* result delivered */
+        qemu_mutex_lock(&tpm_pt->state_lock);
+        tpm_pt->tpm_busy = false;
+        qemu_cond_signal(&tpm_pt->cmd_complete);
+        qemu_mutex_unlock(&tpm_pt->state_lock);
         break;
     case TPM_BACKEND_CMD_INIT:
     case TPM_BACKEND_CMD_END:
@@ -376,6 +385,7 @@ static void tpm_passthrough_reset(TPMBackend *tb)
     tpm_backend_thread_end(&tpm_pt->tbt);
 
     tpm_pt->had_startup_error = false;
+    tpm_pt->tpm_busy = false;
 }
 
 static int tpm_passthrough_init(TPMBackend *tb, TPMState *s,
@@ -452,6 +462,11 @@ static size_t tpm_passthrough_realloc_buffer(TPMSizedBuffer *sb)
 static void tpm_passthrough_deliver_request(TPMBackend *tb)
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
+
+    /* TPM considered busy once TPM Request scheduled for processing */
+    qemu_mutex_lock(&tpm_pt->state_lock);
+    tpm_pt->tpm_busy = true;
+    qemu_mutex_unlock(&tpm_pt->state_lock);
 
     tpm_backend_thread_deliver_request(&tpm_pt->tbt);
 }
@@ -721,6 +736,11 @@ static const TPMDriverOps tpm_passthrough_driver = {
 
 static void tpm_passthrough_inst_init(Object *obj)
 {
+    TPMBackend *tb = TPM_BACKEND(obj);
+    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
+
+    qemu_mutex_init(&tpm_pt->state_lock);
+    qemu_cond_init(&tpm_pt->cmd_complete);
 }
 
 static void tpm_passthrough_inst_finalize(Object *obj)
