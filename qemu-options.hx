@@ -2594,7 +2594,10 @@ DEF("tpmdev", HAS_ARG, QEMU_OPTION_tpmdev, \
     "-tpmdev passthrough,id=id[,path=path][,cancel-path=path]\n"
     "                use path to provide path to a character device; default is /dev/tpm0\n"
     "                use cancel-path to provide path to TPM's cancel sysfs entry; if\n"
-    "                not provided it will be searched for in /sys/class/misc/tpm?/device\n",
+    "                not provided it will be searched for in /sys/class/misc/tpm?/device\n"
+    "-tpmdev cuse-tpm,id=id,path=path\n"
+    "                use path to provide path to a character device to talk to the\n"
+    "                TPM emulator providing a CUSE interface\n",
     QEMU_ARCH_ALL)
 STEXI
 
@@ -2603,8 +2606,8 @@ The general form of a TPM device option is:
 
 @item -tpmdev @var{backend} ,id=@var{id} [,@var{options}]
 @findex -tpmdev
-Backend type must be:
-@option{passthrough}.
+Backend type must be either one of the following:
+@option{passthrough}, @option{cuse-tpm}.
 
 The specific backend type will determine the applicable options.
 The @code{-tpmdev} option creates the TPM backend and requires a
@@ -2653,6 +2656,18 @@ To create a passthrough TPM use the following two options:
 @end example
 Note that the @code{-tpmdev} id is @code{tpm0} and is referenced by
 @code{tpmdev=tpm0} in the device option.
+
+@item -tpmdev cuse-tpm, id=@var{id}, path=@var{path}
+
+(Linux-host only) Enable access to a TPM emulator with a CUSE interface.
+
+@option{path} specifies the path to the CUSE TPM character device.
+
+To create a backend device accessing the CUSE TPM emulator using /dev/vtpm
+use the following two options:
+@example
+-tpmdev cuse-tpm,id=tpm0,path=/dev/vtpm -device tpm-tis,tpmdev=tpm0
+@end example
 
 @end table
 

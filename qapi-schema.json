@@ -3252,10 +3252,12 @@
 # An enumeration of TPM types
 #
 # @passthrough: TPM passthrough type
+# @cuse-tpm: CUSE TPM type
+#            Since: 2.4
 #
 # Since: 1.5
 ##
-{ 'enum': 'TpmType', 'data': [ 'passthrough' ] }
+{ 'enum': 'TpmType', 'data': [ 'passthrough', 'cuse-tpm' ] }
 
 ##
 # @query-tpm-types:
@@ -3284,6 +3286,17 @@
                                              '*cancel-path' : 'str'} }
 
 ##
+# @TPMCuseOptions:
+#
+# Information about the CUSE TPM type
+#
+# @path: string describing the path used for accessing the TPM device
+#
+# Since: 2.4
+##
+{ 'struct': 'TPMCuseOptions', 'data': { 'path' : 'str'}}
+
+##
 # @TpmTypeOptions:
 #
 # A union referencing different TPM backend types' configuration options
@@ -3293,7 +3306,8 @@
 # Since: 1.5
 ##
 { 'union': 'TpmTypeOptions',
-   'data': { 'passthrough' : 'TPMPassthroughOptions' } }
+   'data': { 'passthrough' : 'TPMPassthroughOptions',
+             'cuse-tpm' : 'TPMCuseOptions' } }
 
 ##
 # @TpmInfo:

@@ -855,6 +855,12 @@ void hmp_info_tpm(Monitor *mon, const QDict *qdict)
                            tpo->has_cancel_path ? ",cancel-path=" : "",
                            tpo->has_cancel_path ? tpo->cancel_path : "");
             break;
+        case TPM_TYPE_OPTIONS_KIND_CUSE_TPM:
+            tpo = ti->options->passthrough;
+            monitor_printf(mon, "%s%s",
+                           tpo->has_path ? ",path=" : "",
+                           tpo->has_path ? tpo->path : "");
+            break;
         case TPM_TYPE_OPTIONS_KIND_MAX:
             break;
         }

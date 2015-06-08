@@ -25,7 +25,7 @@ static QLIST_HEAD(, TPMBackend) tpm_backends =
 
 
 #define TPM_MAX_MODELS      1
-#define TPM_MAX_DRIVERS     1
+#define TPM_MAX_DRIVERS     2
 
 static TPMDriverOps const *be_drivers[TPM_MAX_DRIVERS] = {
     NULL,
@@ -270,6 +270,15 @@ static TPMInfo *qmp_query_tpm_inst(TPMBackend *drv)
         if (drv->cancel_path) {
             tpo->cancel_path = g_strdup(drv->cancel_path);
             tpo->has_cancel_path = true;
+        }
+        break;
+    case TPM_TYPE_CUSE_TPM:
+        res->options->kind = TPM_TYPE_OPTIONS_KIND_CUSE_TPM;
+        tpo = g_new0(TPMPassthroughOptions, 1);
+        res->options->passthrough = tpo;
+        if (drv->path) {
+            tpo->path = g_strdup(drv->path);
+            tpo->has_path = true;
         }
         break;
     case TPM_TYPE_MAX:
